@@ -1,0 +1,1531 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AIケアプラン作成</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+<script>
+// ── PINキー管理 ──────────────────────────────
+var pinMode='';      // 'set' or 'unlock'
+var pinBuf='';
+var pinConfirmBuf='';
+var pinPhase=0;      // 0=入力, 1=確認
+
+function openKeyModal(){
+  var saved=localStorage.getItem('cpk_enc');
+  if(saved){
+    // 保存済み→解除モード
+    pinMode='unlock';
+    document.getElementById('pin_title').textContent='PINを入力';
+    document.getElementById('pin_desc').textContent='保存済みAPIキーを呼び出します';
+    document.getElementById('pin_step_key').style.display='none';
+    document.getElementById('pin_step_pin').style.display='block';
+    document.getElementById('btn_change_key').style.display='inline';
+  } else {
+    // 未保存→設定モード
+    pinMode='set';
+    document.getElementById('pin_title').textContent='APIキーを設定';
+    document.getElementById('pin_desc').textContent='APIキーを入力してください';
+    document.getElementById('pin_step_key').style.display='block';
+    document.getElementById('pin_step_pin').style.display='none';
+    document.getElementById('pin_key_input').value='';
+    document.getElementById('btn_change_key').style.display='none';
+  }
+  pinBuf=''; pinConfirmBuf=''; pinPhase=0;
+  buildPinPad();
+  updatePinDots();
+  document.getElementById('pin_overlay').classList.add('show');
+}
+
+function pinStepToPIN(){
+  var k=document.getElementById('pin_key_input').value.trim();
+  if(!k.startsWith('AIza')){
+    alert('APIキーは AIza から始まる文字列を入力してください');
+    return;
+  }
+  pinMode='set';
+  pinPhase=0; pinBuf=''; pinConfirmBuf='';
+  document.getElementById('pin_title').textContent='PINを決める（4桁）';
+  document.getElementById('pin_desc').textContent='覚えやすい4桁の番号を入力してください';
+  document.getElementById('pin_step_key').style.display='none';
+  document.getElementById('pin_step_pin').style.display='block';
+  updatePinDots();
+}
+
+function buildPinPad(){
+  var pad=document.getElementById('pin_pad');
+  pad.innerHTML='';
+  [1,2,3,4,5,6,7,8,9,'',0,'⌫'].forEach(function(n){
+    var btn=document.createElement('button');
+    btn.className='pin-btn'+(n==='⌫'?' del':'');
+    btn.textContent=n;
+    if(n===''){btn.style.visibility='hidden';}
+    else{btn.onclick=function(){pinInput(n);};}
+    pad.appendChild(btn);
+  });
+}
+
+function pinInput(n){
+  if(n==='⌫'){
+    if(pinMode==='unlock'||pinPhase===0) pinBuf=pinBuf.slice(0,-1);
+    else pinConfirmBuf=pinConfirmBuf.slice(0,-1);
+    updatePinDots(); return;
+  }
+  if(pinMode==='unlock'){
+    if(pinBuf.length>=4) return;
+    pinBuf+=n;
+    updatePinDots();
+    if(pinBuf.length===4) setTimeout(tryUnlock,200);
+  } else {
+    // 設定モード
+    if(pinPhase===0){
+      if(pinBuf.length>=4) return;
+      pinBuf+=n; updatePinDots();
+      if(pinBuf.length===4){
+        pinPhase=1; pinConfirmBuf='';
+        document.getElementById('pin_title').textContent='もう一度入力';
+        document.getElementById('pin_desc').textContent='確認のためもう一度同じ番号を';
+        updatePinDots();
+      }
+    } else {
+      if(pinConfirmBuf.length>=4) return;
+      pinConfirmBuf+=n; updatePinDots();
+      if(pinConfirmBuf.length===4) setTimeout(trySave,200);
+    }
+  }
+}
+
+function updatePinDots(){
+  var cur=(pinMode==='unlock'||pinPhase===0)?pinBuf:pinConfirmBuf;
+  for(var i=0;i<4;i++){
+    var dot=document.getElementById('pd'+i);
+    if(dot) dot.className='pin-dot'+(i<cur.length?' filled':'');
+  }
+}
+
+function simpleEncrypt(text, pin){
+  var result='';
+  for(var i=0;i<text.length;i++){
+    result+=String.fromCharCode(text.charCodeAt(i)^pin.charCodeAt(i%pin.length));
+  }
+  return btoa(result);
+}
+
+function simpleDecrypt(enc, pin){
+  try{
+    var text=atob(enc);
+    var result='';
+    for(var i=0;i<text.length;i++){
+      result+=String.fromCharCode(text.charCodeAt(i)^pin.charCodeAt(i%pin.length));
+    }
+    return result;
+  }catch(e){return null;}
+}
+
+function trySave(){
+  if(pinBuf!==pinConfirmBuf){
+    alert('PINが一致しません。最初からやり直してください。');
+    pinPhase=0; pinBuf=''; pinConfirmBuf='';
+    document.getElementById('pin_title').textContent='PINを決める（4桁）';
+    document.getElementById('pin_desc').textContent='覚えやすい4桁の番号を入力してください';
+    updatePinDots(); return;
+  }
+  var key=document.getElementById('pin_key_input').value.trim();
+  var enc=simpleEncrypt(key, pinBuf);
+  localStorage.setItem('cpk_enc', enc);
+  document.getElementById('api_key').value=key;
+  updateKeyStatus(key);
+  closePinModal();
+  alert('✅ APIキーを保存しました！次回からPIN入力だけで使えます。');
+}
+
+function tryUnlock(){
+  var enc=localStorage.getItem('cpk_enc');
+  var key=simpleDecrypt(enc, pinBuf);
+  if(key && key.startsWith('AIza')){
+    document.getElementById('api_key').value=key;
+    updateKeyStatus(key);
+    closePinModal();
+  } else {
+    alert('PINが違います。もう一度入力してください。');
+    pinBuf=''; updatePinDots();
+  }
+}
+
+function clearSavedKey(){
+  if(!confirm('保存済みAPIキーを削除しますか？')) return;
+  localStorage.removeItem('cpk_enc');
+  document.getElementById('api_key').value='';
+  updateKeyStatus('');
+  closePinModal();
+}
+
+function switchToChangeKey(){
+  // PIN解除モードからキー変更モードに切り替え
+  pinMode='set';
+  pinPhase=0; pinBuf=''; pinConfirmBuf='';
+  document.getElementById('pin_title').textContent='新しいAPIキーを設定';
+  document.getElementById('pin_desc').textContent='新しいAPIキーを入力してください';
+  document.getElementById('pin_step_key').style.display='block';
+  document.getElementById('pin_step_pin').style.display='none';
+  document.getElementById('pin_key_input').value='';
+  document.getElementById('btn_change_key').style.display='none';
+}
+
+function closePinModal(){
+  document.getElementById('pin_overlay').classList.remove('show');
+}
+
+function updateKeyStatus(key){
+  var el=document.getElementById('key_status');
+  var txt=document.getElementById('key_status_txt');
+  var hdDot=document.getElementById('hd_key_dot');
+  var hdTxt=document.getElementById('hd_key_txt');
+  if(key && key.startsWith('AIza')){
+    if(el){el.className='key-status';}
+    if(txt){txt.textContent='APIキー設定済み（...'+key.slice(-6)+'）';}
+    if(hdDot){hdDot.style.background='#2d6a4f';}
+    if(hdTxt){hdTxt.textContent='API設定済み';}
+  } else {
+    if(el){el.className='key-status none';}
+    if(txt){txt.textContent='APIキー未設定（サンプル生成になります）';}
+    if(hdDot){hdDot.style.background='#ccc';}
+    if(hdTxt){hdTxt.textContent='APIキー';}
+  }
+}
+
+// 起動時：保存済みキーがあればステータス表示（自動復元はしない）
+(function(){
+  var saved=localStorage.getItem('cpk_enc');
+  if(saved){
+    var el=document.getElementById('key_status');
+    var txt=document.getElementById('key_status_txt');
+    var hdDot=document.getElementById('hd_key_dot');
+    var hdTxt=document.getElementById('hd_key_txt');
+    if(el&&txt){
+      el.className='key-status';
+      el.querySelector('.key-status-dot').style.background='#f59e0b';
+      txt.textContent='APIキー保存済み → 「設定」からPINで呼び出せます';
+    }
+    if(hdDot){hdDot.style.background='#f59e0b';}
+    if(hdTxt){hdTxt.textContent='PIN解除待ち';}
+  }
+})();
+// ─────────────────────────────────────────────
+</script>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:"Noto Sans JP",sans-serif;background:#f5f4f0;color:#1a1816;font-size:14px;line-height:1.6}
+.hd{background:#fff;border-bottom:1px solid #e0dbd3;padding:14px 18px;display:flex;align-items:center;gap:10px;position:sticky;top:0;z-index:100}
+.logo{width:30px;height:30px;background:#2d6a4f;border-radius:8px;display:flex;align-items:center;justify-content:center;color:#fff;font-size:14px;font-weight:700}
+.hd-title{font-size:15px;font-weight:700}
+.hd-sub{font-size:11px;color:#9e9890;margin-top:1px}
+.tabs{display:flex;background:#f0ede8;border-bottom:1px solid #e0dbd3;overflow-x:auto}
+.tab{flex:1;min-width:72px;padding:9px 6px;text-align:center;font-size:11px;color:#9e9890;border-bottom:2px solid transparent;cursor:default;white-space:nowrap}
+.tab.active{color:#2d6a4f;border-bottom-color:#2d6a4f;font-weight:500}
+.tab.done{color:#6b6560;border-bottom-color:#e0dbd3}
+.main{max-width:680px;margin:0 auto;padding:18px 14px 40px}
+.pg{display:none}
+.pg.show{display:block}
+.card{background:#fff;border:1px solid #e0dbd3;border-radius:12px;padding:14px;margin-bottom:12px}
+.sec{font-size:11px;font-weight:700;color:#9e9890;letter-spacing:.08em;text-transform:uppercase;margin-bottom:10px;padding-bottom:7px;border-bottom:1px solid #e0dbd3}
+.f{margin-bottom:10px}
+.f:last-child{margin-bottom:0}
+.f label{display:block;font-size:12px;color:#6b6560;margin-bottom:4px;font-weight:500}
+.f input,.f select,.f textarea{width:100%;padding:8px 11px;border:1px solid #e0dbd3;border-radius:8px;font-family:inherit;font-size:14px;color:#1a1816;background:#fff;outline:none}
+.f input:focus,.f select:focus,.f textarea:focus{border-color:#2d6a4f}
+.f textarea{resize:vertical;min-height:68px;line-height:1.6}
+.f select{background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8'%3E%3Cpath d='M1 1l5 5 5-5' stroke='%236b6560' stroke-width='1.5' fill='none'/%3E%3C/svg%3E");background-repeat:no-repeat;background-position:right 10px center;padding-right:30px;-webkit-appearance:none}
+.g2{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.g3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px}
+.cg{display:grid;grid-template-columns:1fr 1fr;gap:7px}
+.ci{display:flex;align-items:center;gap:7px;padding:8px 10px;border:1px solid #e0dbd3;border-radius:8px;cursor:pointer;font-size:13px;transition:all .15s}
+.ci:hover{background:#f0ede8}
+.ci.on{border-color:#2d6a4f;background:#e8f4ee;color:#1b4332}
+.ci input{display:none}
+.cd{width:16px;height:16px;border:1.5px solid #e0dbd3;border-radius:4px;flex-shrink:0;display:flex;align-items:center;justify-content:center;transition:all .15s}
+.ci.on .cd{background:#2d6a4f;border-color:#2d6a4f}
+.ci.on .cd::after{content:'';width:8px;height:5px;border-left:1.5px solid #fff;border-bottom:1.5px solid #fff;transform:rotate(-45deg) translateY(-1px);display:block}
+.br{display:flex;gap:9px;margin-top:18px}
+.bp{padding:11px 18px;border-radius:8px;font-family:inherit;font-size:14px;font-weight:500;cursor:pointer;border:1px solid #e0dbd3;transition:all .15s;display:flex;align-items:center;gap:6px}
+.bp.pri{background:#2d6a4f;color:#fff;border-color:#2d6a4f;flex:1;justify-content:center}
+.bp.pri:hover{background:#1b4332}
+.bp.sec{background:#fff;color:#6b6560}
+.bp.sec:hover{background:#f0ede8}
+.bp.dl{background:#fff;color:#2d6a4f;border-color:#2d6a4f;flex:1;justify-content:center}
+.bp.dl:hover{background:#e8f4ee}
+.demo-bar{background:#e8f4ee;border:1px solid #a7f3d0;border-radius:8px;padding:9px 13px;margin-bottom:12px;display:flex;align-items:center;justify-content:space-between;gap:10px}
+.demo-bar span{font-size:13px;color:#1b4332}
+.demo-bar button{padding:5px 13px;border-radius:8px;border:1px solid #e0dbd3;background:#fff;font-family:inherit;font-size:12px;cursor:pointer;white-space:nowrap}
+.demo-bar button:hover{background:#f0ede8}
+.gen-wrap{text-align:center;padding:44px 16px}
+.spin{width:44px;height:44px;border:3px solid #e0dbd3;border-top-color:#2d6a4f;border-radius:50%;animation:sp .9s linear infinite;margin:0 auto 18px}
+@keyframes sp{to{transform:rotate(360deg)}}
+.gsteps{list-style:none;text-align:left;display:inline-flex;flex-direction:column;gap:9px;margin-top:18px}
+.gstep{display:flex;align-items:center;gap:9px;font-size:13px;color:#6b6560}
+.gstep .dot{width:8px;height:8px;border-radius:50%;background:#e0dbd3;flex-shrink:0}
+.gstep.act .dot{background:#2d6a4f;animation:pu 1s infinite}
+.gstep.dn .dot{background:#2d6a4f}
+.gstep.act,.gstep.dn{color:#1a1816}
+@keyframes pu{0%,100%{opacity:1}50%{opacity:.35}}
+.rb{background:#f0ede8;border-radius:8px;padding:11px 13px;font-size:13px;color:#1a1816;line-height:1.8;white-space:pre-wrap;word-break:break-all}
+.gl{display:flex;gap:7px;align-items:flex-start;padding:7px 0;border-bottom:1px solid #e0dbd3;font-size:13px}
+.gl:last-child{border-bottom:none}
+.gi{font-size:11px;font-weight:700;color:#9e9890;min-width:18px;margin-top:1px}
+.sr{display:flex;align-items:flex-start;gap:9px;padding:9px 0;border-bottom:1px solid #e0dbd3;font-size:13px}
+.sr:last-child{border-bottom:none}
+.sb{padding:2px 8px;border-radius:99px;font-size:11px;font-weight:500;white-space:nowrap;flex-shrink:0}
+.bh{background:#dbeafe;color:#1e40af}.bt{background:#fef3c7;color:#92400e}.br2{background:#d1fae5;color:#065f46}.bn{background:#fce7f3;color:#9d174d}.bu{background:#ede9fe;color:#5b21b6}
+.ok-bar{background:#e8f4ee;border:1px solid #a7f3d0;border-radius:8px;padding:11px 13px;margin-bottom:14px;display:flex;align-items:center;gap:9px;font-size:13px;color:#1b4332}
+
+/* PINモーダル */
+.pin-overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:999;align-items:center;justify-content:center}
+.pin-overlay.show{display:flex}
+.pin-box{background:#fff;border-radius:16px;padding:24px 20px;width:min(320px,90vw);text-align:center}
+.pin-box h3{font-size:16px;font-weight:700;margin-bottom:6px}
+.pin-box p{font-size:12px;color:#6b6560;margin-bottom:18px}
+.pin-dots{display:flex;justify-content:center;gap:10px;margin-bottom:20px}
+.pin-dot{width:14px;height:14px;border-radius:50%;border:2px solid #ccc;background:#fff;transition:.15s}
+.pin-dot.filled{background:#2d6a4f;border-color:#2d6a4f}
+.pin-pad{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:16px}
+.pin-btn{padding:14px;border-radius:10px;border:1px solid #e0dbd3;background:#f9f8f6;font-size:18px;font-weight:600;cursor:pointer;transition:.1s}
+.pin-btn:active{background:#e8f5ee;border-color:#2d6a4f}
+.pin-btn.del{font-size:14px;color:#e05c2a}
+.pin-cancel{font-size:13px;color:#9e9890;cursor:pointer;text-decoration:underline}
+.key-status{display:flex;align-items:center;gap:8px;padding:9px 12px;border-radius:8px;background:#e8f5ee;border:1px solid #b7dfc8;margin-bottom:8px;font-size:12px}
+.key-status.none{background:#f9f8f6;border-color:#e0dbd3;color:#9e9890}
+.key-status-dot{width:8px;height:8px;border-radius:50%;background:#2d6a4f;flex-shrink:0}
+.key-status.none .key-status-dot{background:#ccc}
+</style>
+</head>
+<body>
+<header class="hd">
+  <div class="logo">介</div>
+  <div><div class="hd-title">AIケアプラン作成</div><div class="hd-sub">居宅サービス計画書 自動生成システム</div></div>
+  <div style="margin-left:auto">
+    <button onclick="openKeyModal()" id="hd_key_btn" style="display:flex;align-items:center;gap:5px;padding:6px 11px;border-radius:8px;border:1px solid #e0dbd3;background:#f9f8f6;font-size:12px;color:#6b6560;cursor:pointer;white-space:nowrap">
+      <span id="hd_key_dot" style="width:7px;height:7px;border-radius:50%;background:#ccc;flex-shrink:0"></span>
+      <span id="hd_key_txt">APIキー</span>
+    </button>
+  </div>
+</header>
+<div class="tabs">
+  <div class="tab active" id="t1">1. 基本情報</div>
+  <div class="tab" id="t2">2. 身体状況</div>
+  <div class="tab" id="t3">3. 生活・環境</div>
+  <div class="tab" id="t4">4. AI生成</div>
+  <div class="tab" id="t5">5. 計画書確認</div>
+</div>
+<main class="main">
+
+<!-- PAGE1 -->
+<div class="pg show" id="p1">
+  <div class="demo-bar">
+    <span>デモ用サンプルデータを入力できます</span>
+    <button onclick="fillDemo()">サンプル入力</button>
+  </div>
+  <div class="card">
+    <div class="sec">利用者基本情報</div>
+    <div class="g3"><div class="f"><label>氏名</label><input id="name" type="text" placeholder="山田 花子"></div><div class="f"><label>年齢</label><input id="age" type="number" placeholder="75"></div><div class="f"><label>性別</label><select id="sex"><option>女性</option><option>男性</option></select></div></div>
+    <div class="g2"><div class="f"><label>要介護度</label><select id="level"><option>要支援1</option><option>要支援2</option><option>要介護1</option><option selected>要介護2</option><option>要介護3</option><option>要介護4</option><option>要介護5</option></select></div><div class="f"><label>主疾患</label><input id="disease" type="text" placeholder="脳梗塞後遺症、変形性膝関節症"></div></div>
+    <div class="g2"><div class="f"><label>同居状況</label><select id="living"><option>独居</option><option>配偶者と同居</option><option selected>子と同居</option><option>その他家族と同居</option></select></div><div class="f"><label>主介護者</label><input id="carer_name" type="text" placeholder="長女"></div></div>
+  </div>
+  <div class="card">
+    <div class="sec">利用者・家族の意向</div>
+    <div class="f"><label>利用者の意向</label><textarea id="wish_user" placeholder="できる限り自宅での生活を続けたい。外出して友人と会いたい。">できる限り自宅での生活を続けたい。外出して友人と会いたい。</textarea></div>
+    <div class="f"><label>家族の意向</label><textarea id="wish_family" placeholder="安全に生活できるよう環境を整えたい。転倒が心配なので見守り体制を充実させたい。">安全に生活できるよう環境を整えたい。転倒が心配なので見守り体制を充実させたい。</textarea></div>
+  </div>
+  <div class="br"><button class="bp pri" onclick="goPage(2)">次へ：身体状況 →</button></div>
+</div>
+
+<!-- PAGE2 -->
+<div class="pg" id="p2">
+  <div class="card">
+    <div class="sec">ADL（日常生活動作）</div>
+    <div class="g2">
+      <div class="f"><label>歩行・移動</label><select id="adl_walk"><option>自立</option><option>杖使用で自立</option><option selected>歩行器使用</option><option>要介助</option><option>車椅子</option><option>全介助</option></select></div>
+      <div class="f"><label>排泄</label><select id="adl_toilet"><option>自立</option><option selected>一部介助</option><option>全介助</option><option>失禁あり</option></select></div>
+      <div class="f"><label>入浴</label><select id="adl_bath"><option>自立</option><option>一部介助</option><option selected>要介助</option><option>全介助</option></select></div>
+      <div class="f"><label>食事</label><select id="adl_eat"><option selected>自立</option><option>一部介助</option><option>全介助</option></select></div>
+      <div class="f"><label>更衣</label><select id="adl_dress"><option>自立</option><option selected>一部介助</option><option>全介助</option></select></div>
+      <div class="f"><label>整容</label><select id="adl_groom"><option selected>自立</option><option>一部介助</option><option>全介助</option></select></div>
+    </div>
+  </div>
+  <div class="card">
+    <div class="sec">認知・健康状態</div>
+    <div class="g3">
+      <div class="f"><label>認知機能</label><select id="cog"><option>問題なし</option><option selected>軽度低下</option><option>中等度低下</option><option>高度低下</option></select></div>
+      <div class="f"><label>転倒リスク</label><select id="fall"><option>低</option><option selected>中</option><option>高</option></select></div>
+      <div class="f"><label>意思疎通</label><select id="comm"><option selected>問題なし</option><option>やや困難</option><option>困難</option></select></div>
+    </div>
+    <div class="f"><label>医療処置・特記事項</label><textarea id="medical" placeholder="高血圧・糖尿病の内服管理あり。週1回かかりつけ医受診。"></textarea></div>
+  </div>
+  <div class="br"><button class="bp sec" onclick="goPage(1)">← 戻る</button><button class="bp pri" onclick="goPage(3)">次へ：生活・環境 →</button></div>
+</div>
+
+<!-- PAGE3 -->
+<div class="pg" id="p3">
+  <div class="card">
+    <div class="sec">生活課題・ニーズ（複数選択）</div>
+    <div class="cg" id="ng">
+      <div class="ci on" data-v="身体機能の維持・向上" onclick="tc(this)"><div class="cd"></div><span>身体機能の維持・向上</span></div>
+      <div class="ci on" data-v="転倒予防" onclick="tc(this)"><div class="cd"></div><span>転倒予防</span></div>
+      <div class="ci" data-v="認知症予防・対応" onclick="tc(this)"><div class="cd"></div><span>認知症予防・対応</span></div>
+      <div class="ci on" data-v="入浴・清潔保持" onclick="tc(this)"><div class="cd"></div><span>入浴・清潔保持</span></div>
+      <div class="ci" data-v="食事・栄養管理" onclick="tc(this)"><div class="cd"></div><span>食事・栄養管理</span></div>
+      <div class="ci on" data-v="社会参加・孤立防止" onclick="tc(this)"><div class="cd"></div><span>社会参加・外出支援</span></div>
+      <div class="ci" data-v="服薬管理" onclick="tc(this)"><div class="cd"></div><span>服薬管理</span></div>
+      <div class="ci" data-v="排泄ケア" onclick="tc(this)"><div class="cd"></div><span>排泄ケア</span></div>
+      <div class="ci on" data-v="家族介護負担の軽減" onclick="tc(this)"><div class="cd"></div><span>家族介護負担の軽減</span></div>
+      <div class="ci" data-v="福祉用具の活用" onclick="tc(this)"><div class="cd"></div><span>福祉用具の活用</span></div>
+    </div>
+  </div>
+  <div class="card">
+    <div class="sec">住環境・介護者状況</div>
+    <div class="g3">
+      <div class="f"><label>住居タイプ</label><select id="house"><option selected>一戸建て</option><option>集合住宅（ELVあり）</option><option>集合住宅（ELVなし）</option></select></div>
+      <div class="f"><label>段差・バリア</label><select id="barrier"><option>なし</option><option selected>一部あり</option><option>多い</option></select></div>
+      <div class="f"><label>介護者状況</label><select id="carer_st"><option>日中在宅</option><option selected>日中不在（就労）</option><option>介護者なし</option></select></div>
+    </div>
+    <div class="f"><label>その他特記事項・趣味など</label><textarea id="note" placeholder="趣味は園芸。近所付き合いを大切にしている。"></textarea></div>
+  </div>
+  <div class="f" style="margin-top:10px">
+    <label style="font-size:13px;color:#6b6560;display:block;margin-bottom:6px">Gemini APIキー（AIケアプラン生成に必要・任意）</label>
+    <div id="key_status" class="key-status none">
+      <div class="key-status-dot"></div>
+      <span id="key_status_txt">APIキー未設定（サンプル生成になります）</span>
+      <button onclick="openKeyModal()" style="margin-left:auto;font-size:11px;padding:3px 10px;border-radius:6px;border:1px solid #2d6a4f;background:#fff;color:#2d6a4f;cursor:pointer">設定</button>
+    </div>
+    <input id="api_key" type="hidden">
+    <p style="font-size:11px;color:#9e9890;margin-top:4px">PINコードで保護して保存できます。<a href="https://aistudio.google.com/app/apikey" target="_blank" style="color:#2d6a4f">Google AI Studio</a>で取得できます。</p>
+  </div>
+  <div class="br"><button class="bp sec" onclick="goPage(2)">← 戻る</button><button class="bp pri" onclick="startGen()">AIでケアプランを生成する</button></div>
+</div>
+
+<!-- PAGE4 -->
+<div class="pg" id="p4">
+  <div class="card gen-wrap">
+    <div class="spin" id="spin"></div>
+    <p style="font-size:15px;font-weight:500" id="gm">アセスメント情報を分析中...</p>
+    <p style="font-size:13px;color:#6b6560;margin-top:5px">AIが最適なケアプランを作成しています</p>
+    <ul class="gsteps">
+      <li class="gstep act" id="gs1"><div class="dot"></div>アセスメント情報を解析</li>
+      <li class="gstep" id="gs2"><div class="dot"></div>生活課題・ニーズを整理</li>
+      <li class="gstep" id="gs3"><div class="dot"></div>長期目標・短期目標を生成</li>
+      <li class="gstep" id="gs4"><div class="dot"></div>適切なサービスを選定</li>
+      <li class="gstep" id="gs5"><div class="dot"></div>計画書を構成</li>
+    </ul>
+  </div>
+</div>
+
+<!-- PAGE5 -->
+<div class="pg" id="p5">
+  <div class="ok-bar"><span>✓ AIによるケアプラン生成が完了しました</span></div>
+  <div class="card"><div class="sec">総合的な援助の方針</div><div class="rb" id="o-policy"></div></div>
+  <div class="card"><div class="sec">長期目標（6ヶ月〜1年）</div><div id="o-long"></div></div>
+  <div class="card"><div class="sec">短期目標（3〜6ヶ月）</div><div id="o-short"></div></div>
+  <div class="card"><div class="sec">推奨サービス一覧</div><div id="o-svc"></div></div>
+  <div class="card"><div class="sec">留意事項・モニタリングポイント</div><div class="rb" id="o-note"></div></div>
+  <div class="br"><button class="bp sec" onclick="goPage(3)">← 修正する</button><button class="bp dl" onclick="dlExcel()">📥 Excelで出力</button><button class="bp dl" onclick="dlPDF()" style="background:#1d4ed8">🖨️ PDFで出力</button><button class="bp dl" onclick="dlInfographicPDF()" style="background:#40916c">📊 インフォグラフィック出力</button></div>
+  <div id="mermaid_container" style="display:block; margin:20px auto; max-width:1000px; padding:20px; background:#fff; border-radius:12px; box-shadow:0 4px 12px rgba(0,0,0,0.05); text-align:center;">
+    <h3 style="color:#2c3e50; margin-bottom:15px;">ケアプラン構造図</h3>
+    <div id="mermaid_graph"></div>
+  </div>
+</div>
+
+</main>
+<script>
+var cpData = null;
+
+function goPage(n) {
+  for (var i=1;i<=5;i++) {
+    document.getElementById('p'+i).classList.toggle('show', i===n);
+    var t=document.getElementById('t'+i);
+    t.classList.remove('active','done');
+    if(i<n) t.classList.add('done');
+    else if(i===n) t.classList.add('active');
+  }
+  window.scrollTo(0,0);
+}
+
+function tc(el) { el.classList.toggle('on'); }
+
+function getChecked() {
+  return Array.from(document.querySelectorAll('#ng .ci.on')).map(function(e){return e.dataset.v;});
+}
+
+function fillDemo() {
+  document.getElementById('name').value='山田 花子';
+  document.getElementById('age').value='75';
+  document.getElementById('sex').value='女性';
+  document.getElementById('level').value='要介護2';
+  document.getElementById('disease').value='脳梗塞後遺症、変形性膝関節症';
+  document.getElementById('living').value='子と同居';
+  document.getElementById('carer_name').value='長女';
+  document.getElementById('wish_user').value='できる限り自宅での生活を続けたい。外出して友人と会いたい。';
+  document.getElementById('wish_family').value='安全に生活できるよう環境を整えたい。転倒が心配なので見守り体制を充実させたい。';
+  document.getElementById('adl_walk').value='歩行器使用';
+  document.getElementById('adl_bath').value='要介助';
+  document.getElementById('cog').value='軽度低下';
+  document.getElementById('fall').value='中';
+  document.getElementById('medical').value='高血圧・糖尿病の内服管理あり。週1回かかりつけ医受診。';
+  document.getElementById('carer_st').value='日中不在（就労）';
+  document.getElementById('note').value='趣味は園芸。近所付き合いを大切にしている。';
+  document.querySelectorAll('#ng .ci').forEach(function(el){
+    var on=['身体機能の維持・向上','転倒予防','入浴・清潔保持','社会参加・孤立防止','家族介護負担の軽減'];
+    if(on.indexOf(el.dataset.v)>=0) el.classList.add('on'); else el.classList.remove('on');
+  });
+  alert('サンプルデータを入力しました。次へ→次へ→AIで生成 を押してください。');
+}
+
+function getFD() {
+  return {
+    name: document.getElementById('name').value||'利用者',
+    age: document.getElementById('age').value,
+    sex: document.getElementById('sex').value,
+    level: document.getElementById('level').value,
+    disease: document.getElementById('disease').value,
+    living: document.getElementById('living').value,
+    carer_name: document.getElementById('carer_name').value,
+    wish_user: (document.getElementById('wish_user')||{}).value||'',
+    wish_family: (document.getElementById('wish_family')||{}).value||'',
+    adl_walk: document.getElementById('adl_walk').value,
+    adl_toilet: document.getElementById('adl_toilet').value,
+    adl_bath: document.getElementById('adl_bath').value,
+    adl_eat: document.getElementById('adl_eat').value,
+    adl_dress: document.getElementById('adl_dress').value,
+    adl_groom: document.getElementById('adl_groom').value,
+    cog: document.getElementById('cog').value,
+    fall: document.getElementById('fall').value,
+    comm: document.getElementById('comm').value,
+    medical: document.getElementById('medical').value,
+    needs: getChecked(),
+    house: document.getElementById('house').value,
+    barrier: document.getElementById('barrier').value,
+    carer_st: document.getElementById('carer_st').value,
+    note: document.getElementById('note').value
+  };
+}
+
+async function startGen() {
+  var fd = getFD();
+  var apiKey = document.getElementById('api_key').value.replace(/[\s\u3000]/g,'');
+  goPage(4);
+  var steps=['gs1','gs2','gs3','gs4','gs5'];
+  var msgs=['アセスメント情報を解析中...','生活課題・ニーズを整理中...','目標を生成中...','サービスを選定中...','計画書を構成中...'];
+  var si=0;
+  var iv=setInterval(function(){
+    if(si>0) { var el=document.getElementById(steps[si-1]); if(el){el.className='gstep dn';} }
+    if(si<steps.length) {
+      var el2=document.getElementById(steps[si]); if(el2){el2.className='gstep act';}
+      var gm=document.getElementById('gm'); if(gm){gm.textContent=msgs[si];}
+      si++;
+    }
+  },800);
+  try {
+    var res;
+    if(apiKey && apiKey.indexOf('AIza')===0) { res=await callAPI(apiKey,fd); }
+    else { await new Promise(function(r){setTimeout(r,4200);}); res=fallback(fd); }
+    clearInterval(iv);
+    steps.forEach(function(s){var el=document.getElementById(s);if(el)el.className='gstep dn';});
+    var sp=document.getElementById('spin');if(sp){sp.style.borderTopColor='#059669';sp.style.animation='none';}
+    var lg = (res.services||[]).map(function(s){return s.long_goal||'';});
+    var sg = (res.services||[]).map(function(s){return s.short_goal||'';});
+    var nd = (res.services||[]).map(function(s){return s.need||'';});
+    cpData={fd:fd,policy:res.policy,needs:nd.length?nd:(res.needs||fd.needs),long_goals:lg.length?lg:(res.long_goals||[]),short_goals:sg.length?sg:(res.short_goals||[]),services:res.services||[],schedule:res.schedule||null,notes:res.notes, mermaid: res.mermaid||''};
+    renderResult(res,fd);
+    setTimeout(function(){
+      goPage(5);
+      var bar=document.querySelector('.ok-bar span');
+      if(bar) bar.textContent='✓ Gemini APIによるケアプラン生成が完了しました';
+      renderInfographic();
+    },500);
+  } catch(e) {
+    clearInterval(iv);
+    console.error('API error:', e);
+    var usingFallback = true;
+    var res2=fallback(fd);
+    var lg2 = (res2.services||[]).map(function(s){return s.long_goal||'';});
+    var sg2 = (res2.services||[]).map(function(s){return s.short_goal||'';});
+    var nd2 = (res2.services||[]).map(function(s){return s.need||'';});
+    cpData={fd:fd,policy:res2.policy,needs:nd2.length?nd2:(res2.needs||fd.needs),long_goals:lg2.length?lg2:(res2.long_goals||[]),short_goals:sg2.length?sg2:(res2.short_goals||[]),services:res2.services||[],schedule:res2.schedule||null,notes:res2.notes, mermaid: res2.mermaid||''};
+    renderResult(res2,fd);
+    setTimeout(function(){
+      goPage(5);
+      var bar=document.querySelector('.ok-bar span');
+      if(bar) bar.textContent='⚠️ APIエラーのためサンプル生成を使用しました（APIキーを確認してください）';
+      renderInfographic();
+    },300);
+  }
+}
+
+async function callAPI(key,fd) {
+  var sysPrompt='あなたは経験豊富な介護支援専門員（ケアマネージャー）です。利用者一人ひとりの状況を深く理解し、その人らしい生活を支えるケアプランを作成します。\n【重要な原則】\n1. 利用者・家族の意向を最優先に目標を設定すること\n2. 主疾患・ADL状況・認知機能を目標文と支援内容に具体的に反映すること\n3. 歩行不能・全介助の場合は通所サービスを安易に選ばず訪問系サービスを優先すること\n4. 長期目標は6〜12ヶ月後のゴールを「〜できる」形式で記載\n5. 短期目標は3〜6ヶ月で達成可能な具体的ステップを記載\n6. サービス内容は実際の介護現場で使う具体的な記述にすること\n7. 留意事項には主疾患・認知症・家族状況に応じた実践的な注意点を記載\nJSONのみで回答（マークダウン・説明文不要）';
+
+  var userPrompt='【利用者情報】\n氏名: '+fd.name+' ('+fd.age+'歳・'+fd.sex+')\n要介護度: '+fd.level+'\n主疾患: '+fd.disease+'\n同居状況: '+fd.living+' 主介護者: '+fd.carer_name+'\n介護者状況: '+fd.carer_st+'\n住環境: '+fd.house+' 段差: '+fd.barrier+'\n\n【ADL状況】\n歩行・移動: '+fd.adl_walk+'\n入浴: '+fd.adl_bath+'\n排泄: '+fd.adl_toilet+'\n食事: '+fd.adl_eat+'\n更衣: '+fd.adl_dress+'\n整容: '+fd.adl_groom+'\n\n【健康・認知】\n認知機能: '+fd.cog+'\n転倒リスク: '+fd.fall+'\n意思疎通: '+fd.comm+'\n医療処置・特記: '+fd.medical+'\n\n【利用者・家族の意向】\n利用者: '+fd.wish_user+'\n家族: '+fd.wish_family+'\n\n【選択した生活課題】\n'+fd.needs.join('、')+'\n\n【その他特記・趣味】\n'+(fd.note||'なし')+'\n\n上記アセスメントをもとにケアプランをJSON形式で作成してください。serviceのtypeは「訪問」「通所」「医療」「用具」のいずれか。各サービスに対して、対応するニーズ・長期目標・短期目標をセットにして記述してください。scheduleは週間スケジュール表です。複数の曜日や時間にまたがる結合を前提とせず、各曜日（mon〜sun）ごとに独立して、サービスが入る時間を「30分単位の枠（スロット）」の配列として定義してください（例: 9:00〜10:30の通所介護なら、9:00-9:30, 9:30-10:00, 10:00-10:30の3枠に分ける）。福祉用具・居宅支援など時刻のないサービスは含めない。\nまた、ケアプラン全体の構成として「現状（ニーズ）→解決策（サービス）→目標（長期・短期）」のプロセスを視覚化するための Mermaid.js の flowchart TD 形式のコードを作成してください。\n【デザイン指示】\n・NotebookLMのような余白を十分に取った洗練されたカード型レイアウト（Bento Grid風）を意識してください。\n・「現状」「解決策」「目標」をそれぞれ subgraph で囲んでください。\n・ノードのテキストには視認性の高い絵文字アイコン（🧍、🚐、🎯など）を付与し、改行には <br> を使って情報を構造化してください。\n・構文エラーを防ぐため、ノードのテキスト部分は必ずダブルクォーテーションで囲んでください（例: A["🧍 身体面<br>移動機能の低下"]）。\n・以下のクラス定義をコード末尾に含め、各ノードに適用（:::needs 等）してパステルカラーにしてください。\n  classDef needs fill:#fce8e6,stroke:#fAD2CF,stroke-width:2px,color:#3c4043,rx:12px,ry:12px;\n  classDef services fill:#e8f0fe,stroke:#d2e3fc,stroke-width:2px,color:#3c4043,rx:12px,ry:12px;\n  classDef goals fill:#e6f4ea,stroke:#ceead6,stroke-width:2px,color:#3c4043,rx:12px,ry:12px;\nJSONの "mermaid" キーに文字列として出力してください。\n{"policy":"（援助方針200字程度）","services":[{"need":"対応するニーズ","long_goal":"長期目標","short_goal":"短期目標","name":"サービス名","detail":"具体的援助内容","type":"訪問|通所|医療|用具","freq":"週○回","office":"事業所名"}],"schedule":{"mon":[{"time":"9:00-9:30","name":"サービス名"},{"time":"9:30-10:00","name":"サービス名"}],"tue":[...],"wed":[...],"thu":[...],"fri":[...],"sat":[...],"sun":[...]},"notes":"留意事項","mermaid":"flowchart TD\\n..."}';
+
+  var r=await fetch('https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=' + key,{
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({
+      systemInstruction: { parts: [{ text: sysPrompt }] },
+      contents: [{ role: 'user', parts: [{ text: userPrompt }] }],
+      generationConfig: {
+        responseMimeType: "application/json"
+      }
+    })
+  });
+  if(!r.ok) throw new Error('API '+r.status);
+  var d=await r.json();
+  var t=d.candidates[0].content.parts[0].text.replace(/```json|```/g,'').trim();
+  // JSONが途中で切れた場合の補完処理
+  try {
+    return JSON.parse(t);
+  } catch(e) {
+    // 末尾を補完して再試行（スタックで正確に閉じ文字を判定）
+    var fixed = t;
+    // 文字列内か判定しながらスタックを構築
+    var stack = [];
+    var inStr = false;
+    var escape = false;
+    for(var ci=0; ci<fixed.length; ci++){
+      var ch = fixed[ci];
+      if(escape){ escape=false; continue; }
+      if(ch==='\\' && inStr){ escape=true; continue; }
+      if(ch==='"'){ inStr=!inStr; continue; }
+      if(inStr) continue;
+      if(ch==='{') stack.push('}');
+      else if(ch==='[') stack.push(']');
+      else if(ch==='}' || ch===']') stack.pop();
+    }
+    // 開いている文字列を閉じる
+    if(inStr) fixed += '"';
+    // スタックに残った閉じ文字を逆順に追加
+    while(stack.length > 0){ fixed += stack.pop(); }
+    try { return JSON.parse(fixed); } catch(e2) {
+      // それでも失敗したらfallbackを呼ぶ（呼び出し元でcatchする）
+      throw e2;
+    }
+  }
+}
+
+function fallback(fd) {
+  var needs=fd.needs||[];
+  var walk=fd.adl_walk||'自立';
+  var bath=fd.adl_bath||'自立';
+  var toilet=fd.adl_toilet||'自立';
+  var cog=fd.cog||'問題なし';
+  var fall=fd.fall||'低';
+  var carer=fd.carer_st||'';
+  var level=fd.level||'要介護1';
+  var lvNum=parseInt(level.replace(/[^0-9]/g,''))||1;
+
+  var severe=['全介助','車椅子'].some(function(v){return walk===v;});
+  var walkAid=['歩行器使用','要介助'].some(function(v){return walk===v;});
+  var bathHelp=['要介助','全介助','一部介助'].some(function(v){return bath===v;});
+  var toiletHelp=['一部介助','全介助','失禁あり'].some(function(v){return toilet===v;});
+  var heavyCog=['中等度低下','高度低下'].some(function(v){return cog===v;});
+  var daytimeAlone=carer.indexOf('就労')>=0||carer.indexOf('不在')>=0||carer==='介護者なし';
+
+  var sv=[], note=[];
+
+  function addSv(nd, lg, sg, name, det, typ, frq, off){
+    sv.push({need: nd, long_goal: lg, short_goal: sg, name: name, detail: det, type: typ, freq: frq, office: off});
+  }
+
+  if(needs.indexOf('身体機能の維持・向上')>=0){
+    if(severe) addSv('身体機能の維持・向上', '現在の身体機能を維持し、褥瘡・拘縮を予防できる', '週2回の訪問リハビリにより関節可動域を維持できる', '訪問リハビリテーション', '関節可動域訓練・ポジショニング指導', '訪問', '週2回', '○○訪問リハ');
+    else if(walkAid) addSv('身体機能の維持・向上', '歩行能力を維持し、安全に在宅生活を継続できる', '週2回のリハビリで筋力・バランス能力を維持・改善できる', '通所リハビリテーション', '個別リハビリ・機能訓練', '通所', '週2回', '○○リハビリセンター');
+    else addSv('身体機能の維持・向上', '身体機能を維持し、自立した日常生活を継続できる', '定期的な運動習慣により筋力低下を予防できる', '通所介護（デイサービス）', '機能訓練・入浴・レクリエーション', '通所', '週2回', '◇◇デイサービスC');
+  }
+
+  if(needs.indexOf('転倒予防')>=0||fall!=='低'){
+    if(severe) addSv('転倒予防', '転倒・骨折なく安全に生活できる', 'ベッド・車椅子間の移乗を安全に行い転落を防止できる', '福祉用具貸与', '特殊寝台・体位変換クッション', '用具', '随時', '△△福祉用具');
+    else if(walkAid) addSv('転倒予防', '転倒・骨折なく安全に生活できる', '歩行補助具を適切に使用し屋内を安全に移動できる', '福祉用具貸与', '歩行器・手すり', '用具', '随時', '△△福祉用具');
+    else addSv('転倒予防', '転倒・骨折なく安全に生活できる', '住環境の整備により転倒リスクを軽減できる', '福祉用具貸与', '手すり・段差解消用品', '用具', '随時', '△△福祉用具');
+    
+    if(fall==='高') note.push('転倒リスクが高いため全サービスで転倒予防を最優先とする');
+    else if(fall==='中') note.push('転倒リスクが中程度のためサービス毎に状態確認を行う');
+  }
+
+  if(needs.indexOf('入浴・清潔保持')>=0||bathHelp){
+    var bf=lvNum>=3?'週3回':'週2回';
+    if(severe) addSv('入浴・清潔保持', '清潔な生活を保ち皮膚トラブルを予防できる', '週2回の清拭・部分浴により清潔を保持できる', '訪問介護', '清拭・部分浴・オムツ交換', '訪問', '週3回', '□□ヘルパーST');
+    else addSv('入浴・清潔保持', '清潔な生活を保ち皮膚トラブルを予防できる', bf+'の入浴介助により清潔を保持できる', '訪問介護', '身体介護（入浴・排泄介助）', '訪問', bf, '□□ヘルパーST');
+  }
+
+  if(needs.indexOf('排泄ケア')>=0||toiletHelp){
+    if(toilet==='失禁あり') addSv('排泄ケア', '適切な排泄ケアにより清潔で尊厳ある生活を維持できる', '定時排泄誘導と福祉用具の活用により皮膚トラブルを防止できる', '福祉用具貸与', 'ポータブルトイレ', '用具', '随時', '△△福祉用具');
+    else addSv('排泄ケア', '安全に排泄でき尊厳ある生活を継続できる', '排泄介助を受けながら転倒なく安全にトイレを使用できる', '訪問介護', '身体介護（排泄介助）', '訪問', '週2回', '□□ヘルパーST');
+  }
+
+  if(needs.indexOf('食事・栄養管理')>=0){
+    addSv('食事・栄養管理', '適切な栄養摂取により体力・免疫力を維持できる', '1日3食バランスのとれた食事を摂取できる', '訪問介護', '生活援助（食事準備・後片付け）', '訪問', '週3回', '□□ヘルパーST');
+  }
+
+  if(needs.indexOf('服薬管理')>=0){
+    addSv('服薬管理', '指示通りに服薬し疾患を安定した状態で管理できる', '服薬カレンダーを活用し飲み忘れなく服薬できる', '訪問看護', '服薬管理・健康状態観察', '医療', '週1回', '◎◎訪問看護ST');
+    note.push('服薬内容・残薬状況を定期的に確認し主治医と情報共有する');
+  }
+
+  if(needs.indexOf('社会参加・孤立防止')>=0){
+    if(severe){
+      addSv('社会参加・孤立防止', '訪問サービスを通じて社会とのつながりを維持し意欲を保てる', 'サービス提供者との交流を通じて精神的に安定した生活を送れる', '訪問看護', '精神的ケア・コミュニケーション', '医療', '週1回', '◎◎訪問看護ST');
+      note.push('外出困難な状況のため訪問サービスでの会話・精神的支援を重視する');
+    } else {
+      addSv('社会参加・孤立防止', '社会参加の機会を確保し生きがいを持って生活できる', '通所サービスへ定期参加し他者との交流を楽しめる', '通所介護（デイサービス）', 'レクリエーション・機能訓練', '通所', '週2回', '◇◇デイサービスC');
+    }
+  }
+
+  if(needs.indexOf('家族介護負担の軽減')>=0){
+    addSv('家族介護負担の軽減', '家族が無理なく介護を継続できる体制を整えられる', '日中のサービス利用により家族が安心して就労できる', '通所介護（デイサービス）', '日中の見守り・入浴・昼食', '通所', '週2回', '◇◇デイサービスC');
+    note.push('介護者の健康状態・疲労度についても定期的に確認する');
+  }
+
+  if(needs.indexOf('認知症予防・対応')>=0||heavyCog){
+    addSv('認知症予防・対応', '認知機能の低下を緩やかにし穏やかな生活を維持できる', '規則正しい生活リズムの維持により症状の安定を図れる', '通所介護（デイサービス）', '認知機能訓練・見守り', '通所', '週2回', '◇◇デイサービスC');
+    if(heavyCog){
+      note.push('判断力が低下しているため意思確認は家族と連携して行う');
+      note.push('急な環境変化や混乱を避けるよう支援者間で情報共有を徹底する');
+    }
+  }
+
+  if(sv.length===0){
+    addSv('日常生活の安定', '安全で自立した在宅生活を継続できる', '必要なサービスを活用しながら日常生活を安定させる', '訪問介護', '身体介護・生活援助', '訪問', '週2回', '□□ヘルパーST');
+  }
+
+  note.push('1ヶ月後にモニタリングを実施し目標達成状況とサービス適合性を評価する');
+
+  var svUniq=[];
+  var seen={};
+  sv.forEach(function(s){
+    if(!seen[s.name]){
+       seen[s.name]=true;
+       svUniq.push(s);
+    }
+  });
+
+  var policy = fd.name+'様（'+level+'）は「'+((fd.wish_user||'').replace(/。.*$/,'')||'自宅での生活継続')+'」というご意向をお持ちです。多職種が連携して支援を行います。';
+
+  var sampleMermaid = `flowchart TD
+  subgraph Needs ["現状（ニーズ）"]
+    direction TB
+    A["🧍 身体面<br>移動機能の低下"]:::needs
+    E["😌 精神面<br>外出機会の減少"]:::needs
+  end
+  subgraph Services ["解決策（サービス）"]
+    direction TB
+    B["🚐 通所介護<br>リハビリ・入浴支援"]:::services
+    C["🩼 福祉用具貸与<br>歩行器の利用"]:::services
+  end
+  subgraph Goals ["目標"]
+    direction TB
+    F["🎯 短期目標<br>週2回の外出と交流を楽しむ"]:::goals
+    D["⭐ 長期目標<br>自宅での安全な生活継続"]:::goals
+  end
+  Needs --> Services --> Goals
+
+  classDef needs fill:#fce8e6,stroke:#fAD2CF,stroke-width:2px,color:#3c4043,rx:12px,ry:12px;
+  classDef services fill:#e8f0fe,stroke:#d2e3fc,stroke-width:2px,color:#3c4043,rx:12px,ry:12px;
+  classDef goals fill:#e6f4ea,stroke:#ceead6,stroke-width:2px,color:#3c4043,rx:12px,ry:12px;`;
+
+  return {policy:policy, services:svUniq, notes:note.join('\\n'), mermaid: sampleMermaid};
+}
+
+var typeCls={訪問:'bh',通所:'bt',医療:'bn',用具:'bu',リハ:'br2'};
+
+function renderResult(r,fd) {
+  document.getElementById('o-policy').textContent=r.policy||'';
+  var lg=(r.services||[]).map(function(s){return s.long_goal||'';});
+  if(lg.join('').trim()==='') lg = r.long_goals||[];
+  var lo=document.getElementById('o-long');
+  lo.innerHTML=lg.map(function(g,i){return '<div class="gl"><span class="gi">'+(i+1)+'</span><span>'+esc(g)+'</span></div>';}).join('');
+  
+  var sg=(r.services||[]).map(function(s){return s.short_goal||'';});
+  if(sg.join('').trim()==='') sg = r.short_goals||[];
+  var so=document.getElementById('o-short');
+  so.innerHTML=sg.map(function(g,i){return '<div class="gl"><span class="gi">'+(i+1)+'</span><span>'+esc(g)+'</span></div>';}).join('');
+  var sv=document.getElementById('o-svc');
+  sv.innerHTML=(r.services||[]).map(function(s){
+    var cls=typeCls[s.type]||'bh';
+    return '<div class="sr"><span class="sb '+cls+'">'+(s.type||'')+'</span><div style="flex:1"><div style="font-weight:500">'+esc(s.name||'')+'</div><div style="font-size:12px;color:#6b6560;margin-top:2px">'+esc(s.detail||'')+'</div></div><div style="text-align:right;font-size:12px;color:#6b6560"><div style="font-weight:500;color:#1a1816">'+esc(s.freq||'')+'</div><div>'+esc(s.office||'')+'</div></div></div>';
+  }).join('');
+  document.getElementById('o-note').textContent=r.notes||'';
+}
+
+function esc(s){
+  return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+var TMPL="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";
+
+function escXml(s){if(!s)return '';var r=String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');r=r.split('\n').join('&#10;');return r;}
+
+
+function dlPDF(){
+  if(!cpData){alert('先にケアプランを生成してください');return;}
+  var fd=cpData.fd, lg=cpData.long_goals||[], sg=cpData.short_goals||[], sv=cpData.services||[];
+  var nd=cpData.needs||fd.needs||[];
+  var today=new Date();
+  var y=today.getFullYear()-2018;
+  var ds='令和'+y+'年'+(today.getMonth()+1)+'月'+today.getDate()+'日';
+  var lvl=fd.level||'要介護2';
+  var wu=(cpData.fd&&cpData.fd.wish_user)||'';
+  var wf=(cpData.fd&&cpData.fd.wish_family)||'';
+
+  function esc(s){return (s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\n/g,'<br>');}
+  function chk(val,target){return val===target?'■':'□';}
+
+  // ─── 第1表 ───
+  var p1=`
+<div class="page">
+  <div class="page-title">居宅サービス計画書（１）</div>
+  <table class="main-table">
+    <tr>
+      <td class="label" style="width:90px">作成年月日</td>
+      <td colspan="3">${esc(ds)}</td>
+      <td class="label" style="width:90px">初回作成日</td>
+      <td colspan="3"></td>
+    </tr>
+    <tr>
+      <td class="label">利用者名</td>
+      <td colspan="3" style="font-size:15px;font-weight:bold">${esc(fd.name||'')}　様</td>
+      <td class="label">生年月日</td>
+      <td colspan="3"></td>
+    </tr>
+    <tr>
+      <td class="label">住所</td>
+      <td colspan="7"></td>
+    </tr>
+    <tr>
+      <td class="label">要介護状態区分</td>
+      <td colspan="7">
+        ${chk(lvl,'要介護1')}要介護1　・　${chk(lvl,'要介護2')}要介護2　・　${chk(lvl,'要介護3')}要介護3　・　${chk(lvl,'要介護4')}要介護4　・　${chk(lvl,'要介護5')}要介護5
+      </td>
+    </tr>
+    <tr>
+      <td class="label">認定有効期間</td>
+      <td colspan="3"></td>
+      <td class="label">担当介護支援専門員</td>
+      <td colspan="3"></td>
+    </tr>
+    <tr>
+      <td class="label" rowspan="2">利用者及び家族の生活に対する意向</td>
+      <td class="sublabel">利用者</td>
+      <td colspan="6">${esc(wu)}</td>
+    </tr>
+    <tr>
+      <td class="sublabel">家族</td>
+      <td colspan="6">${esc(wf)}</td>
+    </tr>
+    <tr>
+      <td class="label">総合的な援助の方針</td>
+      <td colspan="7" style="min-height:80px;line-height:1.8">${esc(cpData.policy||'')}</td>
+    </tr>
+    <tr>
+      <td class="label">生活援助中心型の算定理由</td>
+      <td colspan="7">□1.一人暮らし　□2.家族等が障害・疾病等　□3.その他（　　　　　　　　　　　　　　　）</td>
+    </tr>
+  </table>
+</div>`;
+
+  // ─── 第2表（複数ページ対応・1ページ3サービスまで） ───
+  var ROWS_PER_PAGE = 3;
+  var svList = sv.length > 0 ? sv : [{}];
+  var totalSv = svList.length;
+  var p2 = '';
+  var thead = `<thead>
+      <tr style="background:#d6e8d6;font-size:9px;text-align:center">
+        <th style="width:13%">生活全般の解決すべき課題（ニーズ）</th>
+        <th style="width:15%">長期目標<br>（期間）</th>
+        <th style="width:15%">短期目標<br>（期間）</th>
+        <th style="width:22%">サービス内容</th>
+        <th style="width:5%">※1</th>
+        <th style="width:12%">サービス種別</th>
+        <th style="width:10%">事業所</th>
+        <th style="width:8%">頻度</th>
+      </tr>
+    </thead>`;
+
+  // 行の高さを固定（A4横÷3行分の固定高さ）
+  var ROW_HEIGHT = '55mm';
+
+  for(var pageStart=0; pageStart<totalSv; pageStart+=ROWS_PER_PAGE){
+    var pageEnd = Math.min(pageStart+ROWS_PER_PAGE, totalSv);
+    var svRows = '';
+    for(var i=pageStart; i<pageEnd; i++){
+      var svc=svList[i]||{};
+      // ニーズ・長期・短期はndとlg/sgから取得（インデックスはi、ページをまたいでも正しく参照）
+      var need = nd[i]||'';
+      var longG = lg[i]||'';
+      var shortG = sg[i]||'';
+      svRows+=`
+    <tr style="height:${ROW_HEIGHT};max-height:${ROW_HEIGHT}">
+      <td style="vertical-align:top;word-break:break-all;overflow:hidden">${esc(need)}</td>
+      <td style="vertical-align:top;word-break:break-all;overflow:hidden">${esc(longG)}<br><span style="font-size:9px;color:#666">R7.4〜R8.3</span></td>
+      <td style="vertical-align:top;word-break:break-all;overflow:hidden">${esc(shortG)}<br><span style="font-size:9px;color:#666">R7.4〜R7.9</span></td>
+      <td style="vertical-align:top;word-break:break-all;overflow:hidden">${esc(svc.detail||svc.name||'')}</td>
+      <td style="text-align:center;vertical-align:middle">○</td>
+      <td style="vertical-align:top;word-break:break-all;overflow:hidden">${esc(svc.name||'')}</td>
+      <td style="vertical-align:top;word-break:break-all;overflow:hidden">${esc(svc.office||'')}</td>
+      <td style="vertical-align:top;word-break:break-all;overflow:hidden">${esc(svc.freq||'')}</td>
+    </tr>`;
+    }
+    var pageNum = Math.floor(pageStart/ROWS_PER_PAGE)+1;
+    var totalPages = Math.ceil(totalSv/ROWS_PER_PAGE);
+    var pageLabel = totalPages>1 ? '（'+pageNum+'/'+totalPages+'ページ）' : '';
+    p2 += `
+<div class="page">
+  <div class="page-title">居宅サービス計画書（２）${pageLabel}</div>
+  <table class="main-table" style="table-layout:fixed;border-collapse:collapse">
+    ${thead}
+    <tbody>${svRows}</tbody>
+  </table>
+  <div style="font-size:9px;margin-top:4px;color:#555">
+    ※1 保険給付対象かどうかの区分について、保険給付対象内サービスについては○印を付す。
+    ※2 「当該サービス提供を行う事業所」について記入する。
+  </div>
+</div>`;
+  }
+
+  // ─── 第3表（週間サービス計画表） ───
+  var scheduleData=cpData.schedule||null;
+  var days=['mon','tue','wed','thu','fri','sat','sun'];
+  var dayJP=['月','火','水','木','金','土','日'];
+
+  // 時刻帯の定義
+  var timeSlots=[
+    {label:'深夜',time:'0:00〜6:00'},
+    {label:'早朝',time:'6:00〜8:00'},
+    {label:'午前',time:'8:00〜12:00'},
+    {label:'午後',time:'12:00〜16:00'},
+    {label:'夕方',time:'16:00〜18:00'},
+    {label:'夜間',time:'18:00〜22:00'},
+    {label:'深夜',time:'22:00〜0:00'},
+  ];
+
+  // scheduleDataから各曜日・時刻帯のサービスを取得
+  function getServicesForDayTime(day, slotIdx){
+    if(!scheduleData) return '';
+    var items=scheduleData[day]||[];
+    var slotStart=[0,360,480,720,960,1080,1320][slotIdx];
+    var slotEnd=[360,480,720,960,1080,1320,1440][slotIdx];
+    var found=[];
+    items.forEach(function(item){
+      var timeStr = typeof item === 'string' ? item : item.time;
+      var nameStr = typeof item === 'string' ? item.replace(/\s*\d+:\d+-\d+:\d+/,'').trim() : item.name;
+      var m=(timeStr||'').match(/(\d+):(\d+)-(\d+):(\d+)/);
+      if(!m) return;
+      var start=parseInt(m[1])*60+parseInt(m[2]);
+      if(start>=slotStart && start<slotEnd){
+        if(found.indexOf(nameStr) === -1) {
+          found.push(nameStr);
+        }
+      }
+    });
+    return found.join('<br>');
+  }
+
+  var schedRows='';
+  timeSlots.forEach(function(slot,si){
+    schedRows+='<tr><td class="time-label">'+esc(slot.label)+'<br><span style="font-size:8px">'+esc(slot.time)+'</span></td>';
+    days.forEach(function(day){
+      var svc=getServicesForDayTime(day,si);
+      schedRows+='<td class="sched-cell'+(svc?' has-svc':'')+'">'+esc(svc)+'</td>';
+    });
+    schedRows+='<td></td></tr>';
+  });
+
+  // 週単位サービス（用具・居宅支援など）
+  var weeklyItems=sv.filter(function(s){return s.type==='用具'||s.name.indexOf('居宅')>=0;});
+  var weeklyStr=weeklyItems.map(function(s){return s.name;}).join('・');
+  if(!weeklyStr) weeklyStr='定期受診（かかりつけ医）';
+
+  var p3=`
+<div class="page">
+  <div class="page-title">週間サービス計画表</div>
+  <table class="main-table sched-table" style="height:calc(100% - 28px)">
+    <thead>
+      <tr style="background:#d6e8d6;text-align:center;font-size:10px">
+        <th style="width:70px">時間帯</th>
+        ${dayJP.map(function(d){return '<th>'+d+'</th>';}).join('')}
+        <th style="width:80px">主な日常生活上の活動</th>
+      </tr>
+    </thead>
+    <tbody>${schedRows}</tbody>
+  </table>
+  <table class="main-table" style="margin-top:8px">
+    <tr>
+      <td class="label" style="width:100px">週単位以外のサービス</td>
+      <td>${esc(weeklyStr)}</td>
+    </tr>
+  </table>
+</div>`;
+
+  // ─── HTML全体を組み立てて印刷ウィンドウを開く ───
+  var html=`<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<title>居宅サービス計画書　${esc(fd.name||'')}　${esc(ds)}</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+@page{size:A4 landscape;margin:0}
+body{font-family:"MS Gothic","Hiragino Kaku Gothic ProN","Noto Sans JP",sans-serif;font-size:10px;color:#000;background:#fff}
+.page{
+  width:297mm;height:210mm;
+  padding:6mm 7mm;
+  margin:0 auto;
+  page-break-after:always;
+  display:flex;flex-direction:column;
+  overflow:hidden;
+}
+.page:last-child{page-break-after:auto}
+.page-title{text-align:center;font-size:12px;font-weight:bold;margin-bottom:4px;border-bottom:2px solid #000;padding-bottom:3px;flex-shrink:0}
+.main-table{width:100%;border-collapse:collapse;font-size:9.5px;flex:1}
+.main-table th,.main-table td{border:1px solid #555;padding:2px 4px;vertical-align:middle;line-height:1.4}
+.main-table tbody{height:100%}
+.main-table tbody tr{height:1px}
+.label{background:#d6e8d6;font-weight:bold;text-align:center;white-space:nowrap;font-size:9px}
+.sublabel{background:#e4f0e4;font-weight:bold;text-align:center;white-space:nowrap;font-size:8.5px;width:35px}
+.sched-table{table-layout:fixed}
+.sched-table td,.sched-table th{text-align:center;font-size:9px;word-break:break-all}
+.time-label{background:#d6e8d6;font-weight:bold;font-size:8.5px;text-align:center;white-space:nowrap;width:52px}
+.sched-cell{vertical-align:middle;font-size:8.5px}
+.has-svc{background:#e4f5ea;font-weight:500}
+@media screen{
+  body{background:#888}
+  .page{background:#fff;box-shadow:0 2px 8px rgba(0,0,0,.3);margin:10mm auto}
+}
+@media print{
+  body{background:#fff}
+  .page{margin:0;box-shadow:none}
+}
+</style>
+</head>
+<body>
+${p1}${p2}${p3}
+<div style="text-align:center;padding:15px;color:#666;font-size:12px;print-display:none">
+  <p>↑ このページを印刷してPDF保存できます（Ctrl+P）</p>
+</div>
+<script>
+// 印刷ダイアログを自動表示（任意）
+// window.onload=function(){window.print();}
+<\/script>
+</body>
+</html>`;
+
+  var win=window.open('','_blank');
+  win.document.write(html);
+  win.document.close();
+}
+
+function dlInfographicPDF() {
+  if (!cpData || !cpData.mermaid) {
+    alert('先にケアプランを生成してください');
+    return;
+  }
+  var svgEl = document.getElementById('mermaid_graph').innerHTML;
+  var name = cpData.fd && cpData.fd.name ? cpData.fd.name : '利用者';
+  var html = `<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>ケアプラン構造図 - `+escXml(name)+`様</title>
+<style>
+  @media print {
+    @page { margin: 15mm; size: A4 landscape; }
+    body { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+    .no-print { display: none !important; }
+  }
+  body { font-family: "Inter", "Noto Sans JP", sans-serif; text-align: center; background: #fff; margin:0; padding: 20px; }
+  h2 { color: #2c3e50; margin-bottom: 20px; }
+  #svg-container { max-width: 100%; margin: 0 auto; }
+</style>
+</head>
+<body>
+  <h2>ケアプラン構造図：`+escXml(name)+` 様</h2>
+  <div class="no-print" style="margin-bottom:20px; color:#666; font-size:13px;">
+    ↑ この画面から「PDFとして保存」または「印刷」を実行してください（Ctrl+P）
+  </div>
+  <div id="svg-container">
+    `+svgEl+`
+  </div>
+  <script>
+    window.onload = function() {
+      setTimeout(function() { window.print(); }, 500);
+    };
+  <\/script>
+</body>
+</html>`;
+  var win=window.open('','_blank');
+  win.document.write(html);
+  win.document.close();
+}
+
+
+async function dlExcel(){
+  if(!cpData){alert('先にケアプランを生成してください');return;}
+  var fd=cpData.fd, lg=cpData.long_goals||[], sg=cpData.short_goals||[], sv=cpData.services||[];
+  var today=new Date();
+  var y=today.getFullYear()-2018;
+  var ds='令和'+y+'年'+(today.getMonth()+1)+'月'+today.getDate()+'日';
+  var lvl=fd.level||'要介護2';
+  var cl='　'+(lvl==='要介護1'?'■':'□')+'要介護1　・　'+(lvl==='要介護2'?'■':'□')+'要介護2　・　'+(lvl==='要介護3'?'■':'□')+'要介護3　・　'+(lvl==='要介護4'?'■':'□')+'要介護4　・　'+(lvl==='要介護5'?'■':'□')+'要介護5';
+  var wu=(cpData.fd&&cpData.fd.wish_user)||document.getElementById('wish_user').value||'';
+  var wf=(cpData.fd&&cpData.fd.wish_family)||document.getElementById('wish_family').value||'';
+  var nd=cpData.needs||fd.needs||[];
+
+  function ex(s){
+    if(!s)return '';
+    var r=String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+    return r.split('\n').join('&#10;');
+  }
+  function icell(addr,s,val){return '<c r="'+addr+'" s="'+s+'" t="inlineStr"><is><t>'+ex(val)+'</t></is></c>';}
+  function ncell(addr,s){return '<c r="'+addr+'" s="'+s+'" t="n"></c>';}
+
+  // ── sharedStrings 置換（第1表・第3表用） ──
+  // 第3表サービス配置
+  // 訪問介護: type='訪問' かつ 看護・リハ・入浴でない
+  var visitKaigo = sv.filter(function(s){
+    return s.type==='訪問' && s.name.indexOf('看護')<0 && s.name.indexOf('リハ')<0 && s.name.indexOf('入浴')<0;
+  })[0];
+  // 訪問リハ
+  var visitReha  = sv.filter(function(s){return s.name.indexOf('訪問リハ')>=0||s.name.indexOf('通所リハ')>=0;})[0];
+  // 訪問看護: type='医療' または 名前に「看護」
+  var visitKango = sv.filter(function(s){return s.type==='医療'||s.name.indexOf('看護')>=0;})[0];
+  // 訪問入浴
+  var visitNyuyo = sv.filter(function(s){return s.name.indexOf('入浴')>=0;})[0];
+  // 通所系
+  var tsuusho    = sv.filter(function(s){return s.type==='通所';})[0];
+  var tsuusho2   = sv.filter(function(s){return s.type==='通所';})[1];
+  function freqN(svc){if(!svc)return 0;var m=(svc.freq||'1').match(/\d+/);return m?parseInt(m[0]):1;}
+  var vkN=visitKaigo?visitKaigo.name:'';
+  var vrN=visitReha ?visitReha.name :'';
+  var vkgN=visitKango?visitKango.name:'';
+  var tsN=tsuusho  ?tsuusho.name  :'';
+  var ts2N=tsuusho2?tsuusho2.name :'';
+
+  var rep={
+    '{{DATE}}':ex(ds),
+    '{{NAME}}':ex(fd.name||'利用者'),
+    '{{ADDRESS}}':'','{{CREATOR}}':'','{{OFFICE}}':'','{{CERT_DATE}}':'','{{CERT_END}}':'',
+    '{{CARE_LEVEL}}':ex(cl),
+    '{{WISH}}':'【利用者】'+ex(wu)+'&#10;【家族】'+ex(wf),
+    '{{POLICY}}':ex(cpData.policy||''),
+    '{{WEEKLY_OTHER}}':(function(){
+      var tools=sv.filter(function(s){return s.type==='用具';}).map(function(s){return s.detail||s.name;});
+      return tools.length>0?tools.join('・')+'・定期受診（かかりつけ医）':'定期受診（かかりつけ医）';
+    })(),
+    // 第3表サービス
+    // S3プレースホルダーはscheduleDataで上書きするため空文字
+    '{{S3_MON}}':'','{{S3_TUE}}':'','{{S3_WED}}':'',
+    '{{S3_THU_V}}':'','{{S3_THU_T}}':'','{{S3_FRI}}':'','{{S3_SAT}}':'',
+    '{{S3_AM_MON}}':'','{{S3_AM_TUE}}':'','{{S3_AM_WED}}':'',
+    '{{S3_AM_THU}}':'','{{S3_AM_FRI}}':'','{{S3_AM_SAT}}':'',
+    '{{S3_NOON_MON}}':'','{{S3_NOON_TUE}}':'','{{S3_NOON_WED}}':'',
+    '{{S3_NOON_THU}}':'','{{S3_NOON_FRI}}':'','{{S3_NOON_SAT}}':'',
+    '{{S3_EVE_MON}}':'','{{S3_EVE_TUE}}':'','{{S3_EVE_WED}}':'',
+    '{{S3_EVE_THU}}':'','{{S3_EVE_FRI}}':'','{{S3_EVE_SAT}}':''
+  };
+
+  // ── sheet2.xml 動的生成 ──
+  // ブロックパターン: データ行(1) + 空行(6) + 境界行(1) = 8行
+  // マージパターン: 各ブロックで列A-Pを8行縦マージ
+  var MERGE_COLS=['A:B','C:D','E:E','F:G','H:H','I:J','K:K','L:M','N:N','O:O','P:P'];
+
+  function makeDataRow(rn,need,longG,shortG,det,typ,off,frq){
+    return '<row r="'+rn+'" ht="18" customHeight="1" s="101">'
+      +icell('A'+rn,134,need)+ncell('B'+rn,113)
+      +icell('C'+rn,134,longG)+ncell('D'+rn,113)
+      +'<c r="E'+rn+'" s="135" t="inlineStr"><is><t>R7.4&#12316;R8.3</t></is></c>'
+      +icell('F'+rn,136,shortG)+ncell('G'+rn,113)
+      +'<c r="H'+rn+'" s="135" t="inlineStr"><is><t>R7.4&#12316;R7.9</t></is></c>'
+      +icell('I'+rn,137,det)+ncell('J'+rn,112)
+      +'<c r="K'+rn+'" s="138" t="inlineStr"><is><t>&#9675;</t></is></c>'
+      +icell('L'+rn,137,typ)+ncell('M'+rn,112)
+      +icell('N'+rn,139,off)+icell('O'+rn,140,frq)
+      +'<c r="P'+rn+'" s="135" t="inlineStr"><is><t>R7.4&#12316;</t></is></c>'
+      +'</row>';
+  }
+  function makeSpaceRow(rn){
+    return '<row r="'+rn+'" ht="18" customHeight="1" s="101">'
+      +'<c r="A'+rn+'" s="120"/><c r="B'+rn+'" s="96"/>'
+      +'<c r="C'+rn+'" s="120"/><c r="D'+rn+'" s="96"/>'
+      +'<c r="E'+rn+'" s="141"/><c r="F'+rn+'" s="120"/><c r="G'+rn+'" s="96"/>'
+      +'<c r="H'+rn+'" s="141"/><c r="K'+rn+'" s="141"/>'
+      +'<c r="N'+rn+'" s="141"/><c r="P'+rn+'" s="141"/></row>';
+  }
+  function makeBorderRow(rn){
+    return '<row r="'+rn+'" ht="18" customHeight="1" s="101">'
+      +'<c r="A'+rn+'" s="142"/><c r="B'+rn+'" s="143"/>'
+      +'<c r="C'+rn+'" s="142"/><c r="D'+rn+'" s="143"/>'
+      +'<c r="E'+rn+'" s="144"/><c r="F'+rn+'" s="142"/><c r="G'+rn+'" s="143"/>'
+      +'<c r="H'+rn+'" s="144"/><c r="I'+rn+'" s="145"/><c r="J'+rn+'" s="145"/>'
+      +'<c r="K'+rn+'" s="144"/><c r="L'+rn+'" s="145"/><c r="M'+rn+'" s="145"/>'
+      +'<c r="N'+rn+'" s="144"/><c r="O'+rn+'" s="145"/><c r="P'+rn+'" s="144"/></row>';
+  }
+  function makeMerges(blockIdx){
+    var base=8+blockIdx*8;
+    var end=base+7;
+    return MERGE_COLS.map(function(cols){
+      var p=cols.split(':');
+      return '<mergeCell ref="'+p[0]+base+':'+p[1]+end+'"/>';
+    }).join('');
+  }
+
+  var totalBlocks=Math.max(sv.length,1);
+  var blockRowsXml='', mergesXml='';
+
+  for(var i=0;i<totalBlocks;i++){
+    var base=8+i*8;
+    var svc=sv[i]||{};
+    blockRowsXml+=makeDataRow(base,nd[i]||lg[i]||(svc.name||''),lg[i]||'',sg[i]||'',
+      svc.detail||'',svc.name||'',svc.office||'',svc.freq||'');
+    for(var sr=base+1;sr<=base+6;sr++) blockRowsXml+=makeSpaceRow(sr);
+    blockRowsXml+=makeBorderRow(base+7);
+    mergesXml+=makeMerges(i);
+  }
+
+  // 注記行
+  var nr=8+totalBlocks*8;
+  blockRowsXml+='<row r="'+nr+'" ht="18" customHeight="1"><c r="A'+nr+'" s="159" t="inlineStr"><is><t>&#65339;1&#12288;&#12300;&#20445;&#38522;&#32102;&#20184;&#23550;&#35937;&#12363;&#12393;&#12358;&#12363;&#12398;&#21306;&#20998;&#12301;&#12395;&#12388;&#12356;&#12390;&#12289;&#20445;&#38522;&#32102;&#20184;&#23550;&#35937;&#20869;&#12469;&#12540;&#12499;&#12473;&#12395;&#12388;&#12356;&#12390;&#12399;&#9675;&#21360;&#12434;&#20184;&#12377;&#12290;</t></is></c></row>';
+  blockRowsXml+='<row r="'+(nr+1)+'" ht="18" customHeight="1"><c r="A'+(nr+1)+'" s="159" t="inlineStr"><is><t>&#65339;2&#12288;&#12300;&#24403;&#35442;&#12469;&#12540;&#12499;&#12473;&#25552;&#20379;&#12434;&#34892;&#12358;&#20107;&#26989;&#25152;&#12301;&#12395;&#12388;&#12356;&#12390;&#35352;&#20837;&#12377;&#12427;&#12290;</t></is></c></row>';
+
+  // ── JSZipで処理 ──
+  var bin=atob(TMPL);
+  var buf=new Uint8Array(bin.length);
+  for(var i=0;i<bin.length;i++) buf[i]=bin.charCodeAt(i);
+  var zip=await JSZip.loadAsync(buf.buffer);
+
+  // sharedStrings置換
+  var ssXml=await zip.file('xl/sharedStrings.xml').async('string');
+  var rks=Object.keys(rep);
+  for(var ki=0;ki<rks.length;ki++){var ph=rks[ki],vl=rep[ph],ps=ssXml.indexOf(ph);while(ps>=0){ssXml=ssXml.slice(0,ps)+vl+ssXml.slice(ps+ph.length);ps=ssXml.indexOf(ph,ps+vl.length);}}
+  zip.file('xl/sharedStrings.xml',ssXml);
+
+  // ── sheet3.xml にscheduleを動的書き込み ──
+  // scheduleがない場合はservicesから自動生成
+  function makeScheduleFromServices(svList){
+    var sched={mon:[],tue:[],wed:[],thu:[],fri:[],sat:[],sun:[]};
+    var allDays=['mon','tue','wed','thu','fri','sat','sun'];
+    svList.forEach(function(svc){
+      var name=svc.name||'';
+      var freq=svc.freq||'';
+      var n=parseInt((freq.match(/\d+/)||['1'])[0])||1;
+      var type=svc.type||'';
+      // 用具・月1回以下は除外
+      if(type==='用具'||freq.indexOf('月')>=0||freq.indexOf('継続')>=0||freq.indexOf('常時')>=0) return;
+      // 時刻を推定
+      var time='';
+      // 複数時刻帯（朝・昼・夕）の判定
+      var times=[];
+      if(name.indexOf('朝')>=0||freq.indexOf('朝')>=0) times.push('7:00-8:00');
+      if(name.indexOf('昼')>=0||freq.indexOf('昼')>=0) times.push('12:00-13:00');
+      if(name.indexOf('夕')>=0||name.indexOf('夜')>=0||freq.indexOf('夕')>=0) times.push('17:00-18:00');
+      if(times.length===0){
+        if(name.indexOf('入浴')>=0) times=['10:00-11:30'];
+        else if(name.indexOf('看護')>=0) times=['9:00-10:00'];
+        else if(name.indexOf('リハ')>=0) times=['10:00-11:00'];
+        else if(type==='通所') times=['9:00-16:00'];
+        else times=['9:00-10:00'];
+      }
+      var items=times.map(function(t){return name+' '+t;});
+      // 頻度に応じて曜日を割り当て
+      var days=[];
+      if(n>=7) days=['mon','tue','wed','thu','fri','sat','sun'];
+      else if(n>=6) days=['mon','tue','wed','thu','fri','sat'];
+      else if(n>=5) days=['mon','tue','wed','thu','fri'];
+      else if(n>=4) days=['mon','tue','wed','thu'];
+      else if(n>=3) days=['mon','wed','fri'];
+      else if(n>=2) days=['tue','thu'];
+      else days=['mon'];
+      // 曜日指定がfreqに含まれる場合は解析
+      var dayMap={月:'mon',火:'tue',水:'wed',木:'thu',金:'fri',土:'sat'};
+      // '毎日'の'日'誤マッチを防ぐため日曜は「日曜」「（日）」「・日」のみ
+      var mentioned=[];
+      Object.keys(dayMap).forEach(function(jp){
+        // 曜日の後に特定文字が続く場合のみマッチ（例：月・ 月〜 月曜 （月））
+        var pattern=jp+'[・〜曜）,、 ]|（'+jp+'）|\\('+jp+'\\)';
+        if(new RegExp(pattern).test(freq)) mentioned.push(dayMap[jp]);
+      });
+      // 日曜チェック（「毎日」誤マッチ防止）
+      if(/日曜|（日）|・日[^中本]/.test(freq)) mentioned.push('sun');
+      // 毎日 または 週7回
+      if(freq.indexOf('毎日')>=0) mentioned=['mon','tue','wed','thu','fri','sat','sun'];
+      if(mentioned.length>0) days=mentioned;
+      items.forEach(function(item){days.forEach(function(d){sched[d].push(item);});});
+    });
+    return sched;
+  }
+
+  var scheduleData=cpData.schedule||makeScheduleFromServices(sv);
+
+  if(scheduleData){
+    var s3Xml=await zip.file('xl/worksheets/sheet3.xml').async('string');
+
+    // 30分単位のRow番号変換
+    function timeToRow(t){
+      if(t<360) return null; 
+      if(t>=1320) return 41; // 22:00以降
+      return 9 + Math.floor((t - 360)/30);
+    }
+
+    var dayCol={mon:'C',tue:'E',wed:'G',thu:'I',fri:'K',sat:'M',sun:'O'};
+    var dayEndCol={mon:'D',tue:'F',wed:'H',thu:'J',fri:'L',sat:'N',sun:'P'};
+
+    var cellWrites={};
+    var newMerges=[];
+
+    var sched=scheduleData;
+    var days=['mon','tue','wed','thu','fri','sat','sun'];
+    days.forEach(function(day){
+      var items=sched[day]||[];
+      var col=dayCol[day];
+      var eCol=dayEndCol[day];
+      if(!col || !eCol) return;
+      
+      var slots = [];
+      items.forEach(function(item){
+        var svcName, startTimeStr, endTimeStr;
+        if(typeof item === 'string'){
+          var m = item.match(/(\d+:\d+)-(\d+:\d+)/);
+          if(m){
+             startTimeStr = m[1]; endTimeStr = m[2];
+             svcName = item.replace(/\s*\d+:\d+-\d+:\d+/, '').trim();
+          }
+        } else if(item && item.time){
+          var m = item.time.match(/(\d+:\d+)-(\d+:\d+)/);
+          if(m){
+             startTimeStr = m[1]; endTimeStr = m[2];
+             svcName = item.name;
+          }
+        }
+        
+        if(startTimeStr && endTimeStr && svcName){
+           var sm = startTimeStr.split(':'), em = endTimeStr.split(':');
+           var st = parseInt(sm[0])*60 + parseInt(sm[1]);
+           var et = parseInt(em[0])*60 + parseInt(em[1]);
+           for(var t=st; t<et; t+=30){
+              var r = timeToRow(t);
+              if(r) slots.push({row: r, name: svcName});
+           }
+        }
+      });
+      
+      var rowMap = {};
+      slots.forEach(function(s){
+         if(!rowMap[s.row]) rowMap[s.row] = [];
+         if(rowMap[s.row].indexOf(s.name)<0) rowMap[s.row].push(s.name);
+      });
+      
+      var rowState = {};
+      for(var r=9; r<=41; r++) rowState[r] = null;
+      
+      var uniqueRows = Object.keys(rowMap).map(Number).sort(function(a,b){return a-b;});
+      if(uniqueRows.length > 0){
+         var currentStartRow = uniqueRows[0];
+         var currentNames = rowMap[currentStartRow].join('\n');
+         var currentEndRow = currentStartRow;
+         
+         for(var i=1; i<=uniqueRows.length; i++){
+            var r = uniqueRows[i];
+            var names = r ? rowMap[r].join('\n') : null;
+            
+            if(r === currentEndRow + 1 && names === currentNames){
+               currentEndRow = r;
+            } else {
+               cellWrites[col + currentStartRow] = currentNames;
+               rowState[currentStartRow] = { endRow: currentEndRow, text: currentNames };
+               for(var rr=currentStartRow+1; rr<=currentEndRow; rr++){
+                  rowState[rr] = "merged";
+               }
+               if(r){
+                 currentStartRow = r;
+                 currentEndRow = r;
+                 currentNames = names;
+               }
+            }
+         }
+      }
+
+      // 空き枠も含めてすべての行の結合(C9〜D9など)を生成
+      for(var r=9; r<=41; r++){
+         if(rowState[r] === "merged") continue;
+         if(rowState[r] && typeof rowState[r] === "object"){
+            newMerges.push('<mergeCell ref="'+col+r+':'+eCol+rowState[r].endRow+'"/>');
+         } else {
+            newMerges.push('<mergeCell ref="'+col+r+':'+eCol+r+'"/>');
+         }
+      }
+    });
+
+    // sheet3の既存mergeCellsから、スケジュール領域（C9:P41）のものを完全削除し、新しいブロック結合を追加
+    var mcMatch = s3Xml.match(/<mergeCells[^>]*>([\s\S]*?)<\/mergeCells>/);
+    if(mcMatch){
+      var merges = mcMatch[1].match(/<mergeCell ref="([A-Z]+)(\d+):([A-Z]+)(\d+)"\s*\/>/g) || [];
+      var validMerges = [];
+      merges.forEach(function(m){
+        var refMatch = m.match(/ref="([A-Z]+)(\d+):([A-Z]+)(\d+)"/);
+        if(refMatch){
+          var c1 = refMatch[1], r1 = parseInt(refMatch[2]);
+          var c2 = refMatch[3], r2 = parseInt(refMatch[4]);
+          var col1Idx = c1.charCodeAt(0), col2Idx = c2.charCodeAt(0);
+          // C列(67)〜P列(80)、9行目〜41行目にかかる結合は完全削除
+          if (col1Idx >= 67 && col1Idx <= 80 && r1 >= 9 && r2 <= 41) {
+             return; 
+          }
+          validMerges.push(m);
+        }
+      });
+      validMerges = validMerges.concat(newMerges);
+      var newMergeCells = '<mergeCells count="' + validMerges.length + '">' + validMerges.join('') + '</mergeCells>';
+      s3Xml = s3Xml.replace(/<mergeCells[^>]*>[\s\S]*?<\/mergeCells>/, newMergeCells);
+    }
+
+    // sheet3.xmlの対象セルを書き換え（サービス枠は青色・テキスト挿入、空き枠は色・テキストをクリア）
+    var emptyCols = ['C','D','E','F','G','H','I','J','K','L','M','N','O','P'];
+    for(var r=9; r<=41; r++){
+      emptyCols.forEach(function(c){
+        var cellRef = c + r;
+        if(cellWrites[cellRef]){
+          var val=cellWrites[cellRef];
+          var newCell='<c r="'+cellRef+'" s="77" t="inlineStr"><is><t xml:space="preserve">'+ex(val)+'</t></is></c>';
+          var pat1=new RegExp('<c r="'+cellRef+'"[^>]*><is>[\\s\\S]*?</is></c>');
+          if(pat1.test(s3Xml)){s3Xml=s3Xml.replace(pat1,newCell);return;}
+          var pat2=new RegExp('<c r="'+cellRef+'"[^/]*/>');
+          if(pat2.test(s3Xml)){s3Xml=s3Xml.replace(pat2,newCell);return;}
+          var pat3=new RegExp('<c r="'+cellRef+'"[^>]*><v>[\\s\\S]*?</v></c>');
+          if(pat3.test(s3Xml)){s3Xml=s3Xml.replace(pat3,newCell);}
+        } else {
+          // 空き枠のクリーンアップ（テンプレートに残存するダミーの青塗り・テキストを完全に除去）
+          var s = (c==='C'||c==='D'||c==='G'||c==='H'||c==='K'||c==='L'||c==='O'||c==='P') ? '66' : '65';
+          if(r===9) return; // 9行目はトップ枠線を維持するため元のスタイルを残す（元々青塗りはない）
+          var emptyCell = '<c r="'+cellRef+'" s="'+s+'"/>';
+          var pat1=new RegExp('<c r="'+cellRef+'"[^>]*><is>[\\s\\S]*?</is></c>');
+          if(pat1.test(s3Xml)){s3Xml=s3Xml.replace(pat1,emptyCell);return;}
+          var pat2=new RegExp('<c r="'+cellRef+'"[^/]*/>');
+          if(pat2.test(s3Xml)){s3Xml=s3Xml.replace(pat2,emptyCell);return;}
+          var pat3=new RegExp('<c r="'+cellRef+'"[^>]*><v>[\\s\\S]*?</v></c>');
+          if(pat3.test(s3Xml)){s3Xml=s3Xml.replace(pat3,emptyCell);}
+        }
+      });
+    }
+
+    zip.file('xl/worksheets/sheet3.xml',s3Xml);
+  }
+
+  // sheet2.xml 書き換え
+  var s2=await zip.file('xl/worksheets/sheet2.xml').async('string');
+  // データ行部分を置換（Row8〜末尾の動的部分）
+  s2=s2.replace(/<row r="8"[\s\S]*?(?=<mergeCells|<printOptions|<pageMargins|<pageSetup|<headerFooter|<\/sheetData>)/, blockRowsXml);
+  // マージセルを更新（ヘッダー用マージ保持 + 動的ブロックマージ追加）
+  // マージセルを完全に再構築（ヘッダー固定分 + 動的ブロック分）
+  var headerMergesList=[
+    'F1:J1','N1:P1','L1:M1','B4:D4',
+    'I6:P6','C6:H6','A6:B7','L7:M7','F7:G7','I7:J7','C7:D7'
+  ];
+  var allMergesXml=headerMergesList.map(function(r){return '<mergeCell ref="'+r+'"/>';}).join('')+mergesXml;
+  var mc=(allMergesXml.match(/<mergeCell/g)||[]).length;
+  s2=s2.replace(/<mergeCells[^>]*>[\s\S]*?<\/mergeCells>/,
+    '<mergeCells count="'+mc+'">'+allMergesXml+'</mergeCells>');
+  zip.file('xl/worksheets/sheet2.xml',s2);
+
+  var out=await zip.generateAsync({type:'uint8array',compression:'DEFLATE'});
+  var blob=new Blob([out],{type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'});
+  var url=URL.createObjectURL(blob);
+  var a=document.createElement('a');
+  a.href=url;
+  a.download='ケアプラン_'+(fd.name||'利用者')+'_'+today.toISOString().slice(0,10)+'.xlsx';
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+async function renderInfographic() {
+  var mc = document.getElementById('mermaid_container');
+  var mg = document.getElementById('mermaid_graph');
+
+  if (!cpData || !cpData.mermaid) {
+    mc.style.display = 'none';
+    return;
+  }
+  
+  // Show container
+  mc.style.display = 'block';
+  mg.innerHTML = '<div style="color:#6b6560;padding:20px;">図を描画中...</div>';
+  
+  try {
+    var rawMermaid = cpData.mermaid;
+    // Extract mermaid code block if wrapped in markdown
+    var codeMatch = rawMermaid.match(/```(?:mermaid)?\s*([\s\S]*?)```/);
+    var mermaidCode = codeMatch ? codeMatch[1].trim() : rawMermaid.trim();
+    
+    // Dynamic import of Mermaid v10 ESM
+    const { default: mermaid } = await import('https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs');
+    
+    // Initialize with NotebookLM style (ample whitespace, clean curves, soft colors)
+    mermaid.initialize({ 
+      startOnLoad: false, 
+      theme: 'base',
+      themeVariables: {
+        fontFamily: '"Inter", "Noto Sans JP", sans-serif',
+        lineColor: '#bdc3c7',
+        primaryTextColor: '#3c4043',
+        clusterBkg: '#f8f9fa',
+        clusterBorder: '#e0e0e0'
+      },
+      flowchart: {
+        htmlLabels: true,
+        padding: 30,
+        nodeSpacing: 50,
+        rankSpacing: 60,
+        curve: 'basis'
+      }
+    });
+    
+    // Render with unique ID to avoid conflicts
+    var renderId = 'mermaid_svg_' + Date.now();
+    const { svg } = await mermaid.render(renderId, mermaidCode);
+    mg.innerHTML = svg;
+    
+  } catch (e) {
+    console.error('Mermaid rendering error:', e);
+    mg.innerHTML = '<div style="color:#e05c2a;padding:20px;text-align:left;white-space:pre-wrap;background:#fff5f5;border-radius:8px;border:1px solid #fecaca;"><b>図の生成に失敗しました。</b>\n\n【エラー詳細】\n' + escXml(e.message||e) + '\n\n【AIが生成したMermaidコード】\n' + escXml(mermaidCode) + '</div>';
+  }
+}
+</script>
+
+<!-- PINモーダル -->
+<div class="pin-overlay" id="pin_overlay">
+  <div class="pin-box">
+    <h3 id="pin_title">APIキーを設定</h3>
+    <p id="pin_desc">まずAPIキーを入力してください</p>
+    <!-- APIキー入力ステップ -->
+    <div id="pin_step_key">
+      <input id="pin_key_input" type="password" placeholder="AIzaSy..." 
+        style="width:100%;padding:9px 12px;border:1px solid #e0dbd3;border-radius:8px;font-size:13px;font-family:monospace;margin-bottom:12px;outline:none">
+      <button onclick="pinStepToPIN()" style="width:100%;padding:11px;background:#2d6a4f;color:#fff;border:none;border-radius:10px;font-size:14px;font-weight:600;cursor:pointer">次へ：PINを設定</button>
+      <div style="margin-top:10px">
+        <span class="pin-cancel" onclick="closePinModal()">キャンセル</span>
+        <span style="margin:0 10px;color:#ddd">|</span>
+        <span class="pin-cancel" onclick="clearSavedKey()" style="color:#e05c2a">保存済みキーを削除</span>
+      </div>
+    </div>
+    <!-- PIN入力ステップ -->
+    <div id="pin_step_pin" style="display:none">
+      <div class="pin-dots">
+        <div class="pin-dot" id="pd0"></div>
+        <div class="pin-dot" id="pd1"></div>
+        <div class="pin-dot" id="pd2"></div>
+        <div class="pin-dot" id="pd3"></div>
+      </div>
+      <div class="pin-pad" id="pin_pad"></div>
+      <span class="pin-cancel" onclick="closePinModal()">キャンセル</span>
+      <span style="margin:0 8px;color:#ddd">|</span>
+      <span id="btn_change_key" class="pin-cancel" onclick="switchToChangeKey()" style="display:none;color:#1d4ed8">キーを変更する</span>
+    </div>
+  </div>
+</div>
+</body>
+</html>
